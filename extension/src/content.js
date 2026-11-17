@@ -21,7 +21,17 @@ import {
     searchSignalsById,
     serpDomSignature,
 } from './searchShard.js';
-import { mountOnSearchCard, mountOnVacancyPage, SERP_CARD_SELECTOR, vacancyIdFromCard } from './ui.js';
+import {
+    applyNegotiationBadges,
+    maybeResolveNegotiationVacancyData,
+    resetNegotiationResolveCache,
+} from './negotiations.js';
+import {
+    mountOnSearchCard,
+    mountOnVacancyPage,
+    SERP_CARD_SELECTOR,
+    vacancyIdFromCard,
+} from './ui.js';
 
 const SCAN_INTERVAL_MS = 2000;
 
@@ -52,6 +62,11 @@ function stateSignature(state) {
     const vacancyId = state.analyticsParams?.vacancyId
         ?? state.vacancyView?.vacancyFull?.vacancy?.vacancyId
         ?? '';
+    if (state.suitableVacancies?.vacancies) {
+        const list = state.suitableVacancies.vacancies;
+        const first = list[0]?.vacancyId ?? '';
+        return `negotiations:${list.length}:${first}`;
+    }
     return `vacancy:${vacancyId}`;
 }
 
@@ -93,6 +108,7 @@ function scan(force = false) {
         document.querySelectorAll('[data-job-xray-surface="vacancy"]').forEach((node) => node.remove());
         resetRelatedVacancyCache();
         resetSearchShardCache();
+        resetNegotiationResolveCache();
         lastSerpDomSignature = '';
         lastEmployerSerpPage = null;
     }
@@ -103,7 +119,7 @@ function scan(force = false) {
         lastSignature = signature;
     }
 
-    if (page === 'search' || page === 'home' || page === 'employer') {
+    if (page === 'search' || page === 'home' || page === 'employer' || page === 'negotiations') {
         if (page === 'search') {
             const domSignature = serpDomSignature();
             if (domSignature !== lastSerpDomSignature) {
@@ -118,6 +134,13 @@ function scan(force = false) {
             lastEmployerSerpPage = pageIndex;
         }
         applySearchBadges(state ?? {});
+        if (page === 'negotiations' && state) {
+            applyNegotiationBadges(state);
+            maybeResolveNegotiationVacancyData(state, () => {
+                const fresh = readInitialStateFromDocument() ?? state;
+                applyNegotiationBadges(fresh);
+            });
+        }
         if (page === 'search' && state) {
             maybeResolveSearchPageData(state, () => {
                 applySearchBadges(readInitialStateFromDocument() ?? state);
@@ -219,7 +242,7 @@ registerRelatedVacanciesListener(() => {
 
 registerSearchShardListener(() => {
     const page = detectPage(location.pathname);
-    if (page !== 'search' && page !== 'home' && page !== 'employer') {
+    if (page !== 'search' && page !== 'home' && page !== 'employer' && page !== 'negotiations') {
         return;
     }
     applySearchBadges(readInitialStateFromDocument() ?? {});

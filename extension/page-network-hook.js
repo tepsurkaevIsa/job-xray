@@ -31,12 +31,17 @@
 
     function isSearchPaginationHtml(url) {
         const raw = String(url);
-        if (!/\/search\/vacancy/.test(raw) || !/[?&]page=\d+/.test(raw)) {
+        if (!/[?&]page=\d+/.test(raw)) {
+            return false;
+        }
+        if (!/\/search\/vacancy|\/vacancies\//.test(raw)) {
             return false;
         }
         try {
             const { pathname } = new URL(raw, location.origin);
-            return pathname === '/search/vacancy' || pathname.endsWith('/search/vacancy');
+            return pathname === '/search/vacancy'
+                || pathname.endsWith('/search/vacancy')
+                || /\/vacancies\//.test(pathname);
         } catch {
             return true;
         }

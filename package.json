@@ -1,6 +1,6 @@
 {
   "name": "job-xray",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "private": true,
   "type": "module",
   "description": "Surfaces hidden hh.ru vacancy response counters (total, unread, per day, real age).",
@@ -12,7 +12,8 @@
     "prepare": "node scripts/install-git-hooks.mjs"
   },
   "devDependencies": {
-    "acorn": "^8.15.0"
+    "acorn": "^8.15.0",
+    "linkedom": "^0.18.12"
   },
   "engines": {
     "node": ">=20"

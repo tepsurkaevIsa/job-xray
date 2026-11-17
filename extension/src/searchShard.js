@@ -36,6 +36,13 @@ export function ingestSearchVacanciesShard(payload) {
     }
 }
 
+export function ingestVacancyMetrics(item) {
+    if (!item?.id) {
+        return;
+    }
+    shardById.set(item.id, computeSignals(item));
+}
+
 export function resetSearchShardCache() {
     shardById.clear();
     lastResolvedKey = '';
@@ -143,8 +150,18 @@ export function ingestSearchVacanciesHtml(html) {
     return true;
 }
 
+function searchVacancyPagePath() {
+    if (/\/search\/vacancy/.test(location.pathname)) {
+        return '/search/vacancy';
+    }
+    if (/\/vacancies\//.test(location.pathname)) {
+        return location.pathname;
+    }
+    return '/search/vacancy';
+}
+
 async function fetchSearchVacancyHtml(pageIndex, sessionId) {
-    const url = new URL('/search/vacancy', location.origin);
+    const url = new URL(searchVacancyPagePath(), location.origin);
     const params = new URLSearchParams(location.search);
     params.set('page', String(pageIndex));
     params.set('search_session_id', sessionId);

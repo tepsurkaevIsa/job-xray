@@ -6,6 +6,19 @@ Version numbers match `package.json`, extension manifests, and Git tags (`v*`). 
 
 ## [Unreleased]
 
+## [0.1.8] - 2026-11-17
+
+### Added
+
+- Applicant «Отклики и приглашения» (`/applicant/negotiations`): SERP badges from `suitableVacancies`; negotiation rows via lazy `/vacancy/{id}` HTML parse.
+- Catalog SERP «Подработка» and other `/vacancies/*` (e.g. `/vacancies/podrabotka`): same search badges and pagination as `/search/vacancy`.
+- Vacancy page HTML fixtures (`page1`–`page3`, guest SSR samples, `reviews.html`, `parttime.html`) and linkedom mount tests.
+
+### Fixed
+
+- Vacancy page (logged-in): mount after the stacked «Условия» card — not the bottom «Откликнуться» by the map (`vacancy-actions_magritte-vacancy-top`, topmost apply).
+- Vacancy page: no `body` fallback; re-mount when SPA placement is wrong; skip viewers chip when hh shows «Сейчас смотрят».
+
 ## [0.1.7] - 2026-10-20
 
 ### Added

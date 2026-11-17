@@ -331,8 +331,13 @@ export function createBadge(signals, variant = 'search', options = {}) {
     host.setAttribute('data-job-xray-surface', variant);
     host.style.setProperty('display', 'block', 'important');
     host.style.setProperty('width', '100%', 'important');
+    host.style.setProperty('max-width', '100%', 'important');
+    host.style.setProperty('min-width', '0', 'important');
     host.style.setProperty('box-sizing', 'border-box', 'important');
-    host.style.setProperty('margin-top', variant === 'vacancy' ? '16px' : '8px', 'important');
+    host.style.setProperty('margin-top', variant === 'vacancy' ? '12px' : '8px', 'important');
+    host.style.setProperty('margin-bottom', variant === 'vacancy' ? '0' : '0', 'important');
+    host.style.setProperty('position', 'relative', 'important');
+    host.style.setProperty('z-index', '0', 'important');
     const shadow = host.attachShadow({ mode: 'open' });
 
     const style = document.createElement('style');
@@ -369,6 +374,7 @@ export function createBadge(signals, variant = 'search', options = {}) {
 }
 
 export const SERP_CARD_SELECTOR = '[data-qa="vacancy-serp__vacancy"]';
+export const NEGOTIATION_ITEM_SELECTOR = '[data-qa="negotiations-item"]';
 
 export function closestSerpCard(node) {
     return node?.closest?.(SERP_CARD_SELECTOR) ?? null;
@@ -432,12 +438,15 @@ export function cardShowsHhViewers(root) {
     if (!root?.querySelectorAll) {
         return false;
     }
-    const nodes = root.querySelectorAll('span, p');
+    const nodes = root.querySelectorAll('span, p, div, time, li');
     for (const node of nodes) {
         if (node.closest?.('[data-job-xray]')) {
             continue;
         }
         const text = (node.textContent || '').replace(/\s+/g, ' ').trim();
+        if (!text || text.length > 220) {
+            continue;
+        }
         if (/сейчас смотрят/i.test(text) || /сейчас эту вакансию/i.test(text)) {
             return true;
         }
@@ -465,6 +474,43 @@ export function mountOnSearchCard(article, signals) {
     point.node.appendChild(badge);
 }
 
+export function vacancyIdFromNegotiationItem(item) {
+    const vacancy = item?.querySelector?.('[data-qa="negotiations-item-vacancy"]');
+    const href = vacancy?.getAttribute?.('href')
+        || vacancy?.querySelector?.('a[href*="/vacancy/"]')?.getAttribute?.('href')
+        || item?.querySelector?.('a[href*="/vacancy/"]')?.getAttribute?.('href')
+        || '';
+    const match = href.match(/\/vacancy\/(\d+)/);
+    return match ? match[1] : null;
+}
+
+function negotiationItemMountPoint(item) {
+    const vacancy = item.querySelector('[data-qa="negotiations-item-vacancy"]');
+    const row = vacancy?.parentElement;
+    if (row && row !== item) {
+        return { mode: 'after', ref: row };
+    }
+    const company = item.querySelector('[data-qa="negotiations-item-company"]');
+    if (company) {
+        return { mode: 'after', ref: company };
+    }
+    return { mode: 'append', ref: item };
+}
+
+export function mountOnNegotiationItem(item, signals) {
+    if (!item || item.querySelector('[data-job-xray]')) {
+        return;
+    }
+
+    const badge = createBadge(signals, 'search');
+    const point = negotiationItemMountPoint(item);
+    if (point.mode === 'after' && point.ref?.insertAdjacentElement) {
+        point.ref.insertAdjacentElement('afterend', badge);
+        return;
+    }
+    point.ref?.appendChild?.(badge);
+}
+
 function closestCard(node) {
     if (!node?.closest) {
         return null;
@@ -474,39 +520,425 @@ function closestCard(node) {
         || null;
 }
 
+/**
+ * Vacancy header slot: after the summary block (logged-in «Где работать / График /
+ * Условия» or guest experience row), still inside the white card and before
+ * «Откликнуться». Never after the outer card — actions often sit in a sibling noprint.
+ */
+export function pickVacancyMountTarget(doc = document) {
+    const heading = doc.querySelector('h1, [data-qa="vacancy-title"]');
+    const apply = pickHeaderApply(doc, heading);
+    const article = heading?.closest?.('article') || apply?.closest?.('article');
+    const card = closestCard(apply) || closestCard(heading);
+    const headerRoot = vacancyHeaderRoot(heading, apply, card, article);
+    const root = headerRoot || article || card || doc.body;
+    const titleBox = root.querySelector?.('.vacancy-title')
+        || heading?.closest?.('.vacancy-title')
+        || (heading?.matches?.('[data-qa="vacancy-title"], #vacancy-title')
+            ? heading.closest?.('[class*="magritte-v-spacing-container"], [class*="magritte-card"]')
+            : null);
+
+    const stackedTail = findStackedSummaryTail(heading);
+    if (stackedTail) {
+        return { mode: 'after', ref: stackedTail };
+    }
+
+    const metaBlock = findHeaderMetaBlock(root, titleBox, apply);
+    if (metaBlock && metaBlock !== root) {
+        return { mode: 'after', ref: metaBlock };
+    }
+
+    const topActions = findHeaderTopActions(apply, headerRoot);
+    if (topActions && headerApplyButton(apply, topActions) && vacancyHeaderActions(topActions, heading, headerRoot)) {
+        return { mode: 'before', ref: topActions };
+    }
+
+    const actions = headerActionsRef(apply);
+    if (actions && headerApplyButton(apply, actions) && vacancyHeaderActions(actions, heading, headerRoot)) {
+        return { mode: 'before', ref: actions };
+    }
+
+    const headerColumn = titleBox?.closest?.('[class*="magritte-v-spacing-container"]')
+        || titleBox?.parentElement;
+    if (headerColumn && root.contains?.(headerColumn)) {
+        return { mode: 'append', ref: headerColumn };
+    }
+
+    if (titleBox && root.contains?.(titleBox)) {
+        return { mode: 'after', ref: titleBox };
+    }
+
+    if (heading && article?.contains?.(heading)) {
+        return { mode: 'after', ref: heading.closest?.('h2, h3, h4') || heading };
+    }
+
+    return { mode: 'prepend', ref: doc.body };
+}
+
+function isMagritteCard(el) {
+    return Boolean(el && String(el.className || '').includes('magritte-card'));
+}
+
+/** Logged-in vacancy: title + «Где работать / График / Условия» as sibling cards. */
+function findStackedSummaryTail(heading) {
+    const titleCard = heading?.closest?.('[class*="magritte-card"]');
+    if (!titleCard?.parentElement) {
+        return null;
+    }
+    let conditionsCard = null;
+    let sawWhere = false;
+    let node = titleCard.nextElementSibling;
+    while (node) {
+        if (isVacancyBodyContent(node)) {
+            break;
+        }
+        if (isMagritteCard(node)) {
+            const text = normalizeVacancyText(node.textContent);
+            if (/^Где работать/i.test(text) || (text.startsWith('Где работать') && text.length < 160)) {
+                sawWhere = true;
+                node = node.nextElementSibling;
+                continue;
+            }
+            if (/^График/i.test(text) && sawWhere) {
+                node = node.nextElementSibling;
+                continue;
+            }
+            if ((/^Условия/i.test(text) || (/Условия/.test(text) && sawWhere)) && text.length < 400) {
+                conditionsCard = node;
+                node = node.nextElementSibling;
+                continue;
+            }
+            if (conditionsCard) {
+                break;
+            }
+            if (text.length > 500) {
+                break;
+            }
+        }
+        if (conditionsCard) {
+            break;
+        }
+        node = node.nextElementSibling;
+    }
+    return conditionsCard;
+}
+
+function vacancyHeaderRoot(heading, apply, card, article) {
+    const titleCard = heading?.closest?.('[class*="magritte-card"]');
+    if (titleCard && findStackedSummaryTail(heading)) {
+        const stack = titleCard.parentElement;
+        return stack?.closest?.('article, [data-qa="main-content"], [class*="magritte-grid-column"]')
+            || stack
+            || titleCard;
+    }
+    return titleCard
+        || heading?.closest?.('[class*="magritte-card"]')
+        || apply?.closest?.('[class*="magritte-card"]')
+        || card
+        || article;
+}
+
+function findHeaderTopActions(apply, headerRoot) {
+    const scopes = [headerRoot, apply?.closest?.('[class*="magritte-card"]')].filter(Boolean);
+    for (const scope of scopes) {
+        const top = scope.querySelector?.('[class*="vacancy-actions_magritte-vacancy-top"]');
+        if (top && (!apply || top.contains(apply))) {
+            return top;
+        }
+    }
+    return null;
+}
+
+function headerActionsRef(apply) {
+    return apply?.closest?.('.vacancy-actions, [class*="vacancy-actions"]') || null;
+}
+
+function headerApplyButton(apply, actions) {
+    if (!actions || !apply) {
+        return false;
+    }
+    if (inFixedActionBar(apply)) {
+        return false;
+    }
+    return actions.contains(apply);
+}
+
+function vacancyHeaderActions(actions, heading, headerRoot) {
+    if (headerRoot?.contains?.(actions)) {
+        return true;
+    }
+    if (!heading?.getBoundingClientRect || !actions?.getBoundingClientRect) {
+        return false;
+    }
+    const titleTop = heading.getBoundingClientRect().top;
+    const actionsTop = actions.getBoundingClientRect().top;
+    return actionsTop >= titleTop && actionsTop - titleTop < 720;
+}
+
+function findHeaderMetaBlock(root, titleBox, apply) {
+    const branded = findBrandedSummaryBlock(root, apply);
+    if (branded) {
+        return branded;
+    }
+
+    if (!titleBox || !root.contains?.(titleBox)) {
+        return null;
+    }
+
+    let sibling = titleBox.nextElementSibling;
+    while (sibling) {
+        if (apply && (sibling === apply || sibling.contains?.(apply))) {
+            break;
+        }
+        if (looksLikeHeaderMetaBlock(sibling)) {
+            return sibling;
+        }
+        sibling = sibling.nextElementSibling;
+    }
+    return null;
+}
+
+function findBrandedSummaryBlock(root, apply) {
+    const labels = root.querySelectorAll?.('dt, th, span, p, div') || [];
+    for (const label of labels) {
+        const labelText = normalizeVacancyText(label.textContent);
+        if (!/^Где работать/i.test(labelText) || labelText.length > 40) {
+            continue;
+        }
+        const block = label.closest?.('div, section, dl, ul, table')
+            || label.parentElement;
+        if (!block || block === root) {
+            continue;
+        }
+        if (apply && block.contains(apply)) {
+            continue;
+        }
+        if (block.closest?.('[data-job-xray]')) {
+            continue;
+        }
+        if (isVacancyBodyContent(block)) {
+            continue;
+        }
+        const blockText = normalizeVacancyText(block.textContent);
+        if (blockText.length < 20 || blockText.length > 1200) {
+            continue;
+        }
+        if (/График/.test(blockText) && /Условия/.test(blockText)) {
+            return block;
+        }
+    }
+
+    let best = null;
+    const nodes = root.querySelectorAll?.('div, section, dl') || [];
+    for (const el of nodes) {
+        if (apply && (el === apply || el.contains?.(apply))) {
+            continue;
+        }
+        if (el.closest?.('[data-job-xray]')) {
+            continue;
+        }
+        if (isVacancyBodyContent(el)) {
+            continue;
+        }
+        const text = normalizeVacancyText(el.textContent);
+        if (text.length < 25 || text.length > 1200) {
+            continue;
+        }
+        if (!/Где работать/.test(text) || !/График/.test(text) || !/Условия/.test(text)) {
+            continue;
+        }
+        if (!best || best.contains?.(el)) {
+            best = el;
+        }
+    }
+    return best;
+}
+
+function looksLikeHeaderMetaBlock(el) {
+    if (!el?.querySelector) {
+        return false;
+    }
+    return Boolean(
+        el.querySelector('[data-qa="vacancy-experience"], [data-qa="vacancy-hiring-formats"], [data-qa="compensation-frequency-text"]')
+        || String(el.className || '').includes('magritte-v-spacing-container'),
+    );
+}
+
+function normalizeVacancyText(value) {
+    return (value || '').replace(/\s+/g, ' ').trim();
+}
+
+function isVacancyBodyContent(node) {
+    return Boolean(node?.closest?.(
+        '[data-qa="vacancy-description"], [data-qa="vacancy-address-with-map"], .vacancy-description',
+    ));
+}
+
+function vacancyMountIsReady(point, doc = document) {
+    if (!point?.ref) {
+        return false;
+    }
+    return !(point.mode === 'prepend' && point.ref === doc.body);
+}
+
+function vacancyBadgeAtPoint(badge, point) {
+    if (!badge || !point?.ref) {
+        return false;
+    }
+    if (point.mode === 'before') {
+        return badge.nextElementSibling === point.ref;
+    }
+    if (point.mode === 'after') {
+        return badge.previousElementSibling === point.ref;
+    }
+    if (point.mode === 'append') {
+        return badge.parentElement === point.ref;
+    }
+    if (point.mode === 'prepend') {
+        return badge.parentElement === point.ref && badge === point.ref.firstElementChild;
+    }
+    return false;
+}
+
+function vacancyBadgeMisplaced(badge, point, doc = document) {
+    if (!badge) {
+        return true;
+    }
+    if (badge.parentElement === doc.body || badge.parentElement === doc.documentElement) {
+        return true;
+    }
+    if (!vacancyMountIsReady(point, doc)) {
+        return true;
+    }
+    const heading = doc.querySelector?.('h1, [data-qa="vacancy-title"]');
+    if (heading?.getBoundingClientRect && badge.getBoundingClientRect) {
+        const gap = badge.getBoundingClientRect().top - heading.getBoundingClientRect().top;
+        if (gap > 720) {
+            return true;
+        }
+    }
+    return !vacancyBadgeAtPoint(badge, point);
+}
+
+function pickHeaderApply(doc, heading = doc.querySelector?.('h1, [data-qa="vacancy-title"]')) {
+    const nodes = [...doc.querySelectorAll('[data-qa="vacancy-response-link-top"]')]
+        .filter((node) => !inFixedActionBar(node));
+    const visible = nodes.filter((node) => {
+        if (typeof node.getBoundingClientRect !== 'function') {
+            return true;
+        }
+        const rect = node.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+    });
+    if (!heading || visible.length === 0) {
+        return visible[0] || nodes[0] || null;
+    }
+
+    const titleCard = heading.closest?.('[class*="magritte-card"]');
+    const stackParent = titleCard?.parentElement;
+    const stackedHeader = stackParent && findStackedSummaryTail(heading);
+    let best = null;
+    let bestTop = Infinity;
+    for (const node of visible) {
+        const rel = heading.compareDocumentPosition(node);
+        if (!(rel & 4)) {
+            continue;
+        }
+        const nodeCard = node.closest?.('[class*="magritte-card"]');
+        if (titleCard && nodeCard && titleCard !== nodeCard && !stackedHeader) {
+            continue;
+        }
+        if (stackedHeader && stackParent && !stackParent.contains(node)) {
+            continue;
+        }
+        if (isVacancyBodyContent(node)) {
+            continue;
+        }
+        const top = node.getBoundingClientRect().top;
+        if (top < bestTop) {
+            bestTop = top;
+            best = node;
+        }
+    }
+    if (best) {
+        return best;
+    }
+
+    best = null;
+    bestTop = Infinity;
+    for (const node of visible) {
+        const rel = heading.compareDocumentPosition(node);
+        if (!(rel & 4)) {
+            continue;
+        }
+        const top = node.getBoundingClientRect().top;
+        if (top < bestTop) {
+            bestTop = top;
+            best = node;
+        }
+    }
+    if (best) {
+        return best;
+    }
+    if (stackedHeader && stackParent) {
+        const inStack = nodes.filter((node) => stackParent.contains(node));
+        if (inStack.length) {
+            return inStack[0];
+        }
+    }
+    return visible[0] || nodes[0] || null;
+}
+
+function inFixedActionBar(node) {
+    return Boolean(node?.closest?.('[data-qa="action-bar"], [class*="action-bar"]'));
+}
+
 function visibleNode(nodes) {
     return [...nodes].find((node) => {
+        if (typeof node.getBoundingClientRect !== 'function') {
+            return true;
+        }
         const rect = node.getBoundingClientRect();
         return rect.width > 0 && rect.height > 0;
     }) || nodes[0] || null;
 }
 
 export function mountOnVacancyPage(signals, doc = document) {
+    const point = pickVacancyMountTarget(doc);
+    if (!vacancyMountIsReady(point, doc)) {
+        doc.querySelector('[data-job-xray-surface="vacancy"]')?.remove();
+        return;
+    }
+
     const existing = doc.querySelector('[data-job-xray-surface="vacancy"]');
     if (existing) {
-        if (existing.getAttribute('data-job-xray') === signals.id && doc.contains(existing)) {
+        const sameVacancy = existing.getAttribute('data-job-xray') === signals.id && doc.contains(existing);
+        if (sameVacancy && !vacancyBadgeMisplaced(existing, point, doc)) {
             return;
         }
         existing.remove();
     }
 
-    const badge = createBadge(signals, 'vacancy');
-    const apply = visibleNode(doc.querySelectorAll('[data-qa="vacancy-response-link-top"]'));
-    const heading = doc.querySelector('h1');
-    const viewers = findViewersNode(doc, /сейчас эту вакансию/i);
-    const card = closestCard(apply) || closestCard(heading) || closestCard(viewers);
+    const badge = createBadge(signals, 'vacancy', {
+        hideOnlineViewers: cardShowsHhViewers(doc.body || doc),
+    });
+    insertVacancyBadge(badge, point);
+}
 
-    if (card) {
-        card.insertAdjacentElement('afterend', badge);
+function insertVacancyBadge(badge, point) {
+    if (point.mode === 'append' && point.ref?.appendChild) {
+        point.ref.appendChild(badge);
         return;
     }
-    if (heading) {
-        heading.insertAdjacentElement('afterend', badge);
+    if (point.mode === 'before' && point.ref?.parentElement?.insertBefore) {
+        point.ref.parentElement.insertBefore(badge, point.ref);
         return;
     }
-    if (apply?.parentElement) {
-        apply.parentElement.insertAdjacentElement('beforebegin', badge);
+    if (point.mode === 'after' && point.ref?.insertAdjacentElement) {
+        point.ref.insertAdjacentElement('afterend', badge);
         return;
     }
-    doc.body?.prepend(badge);
+    if (point.mode === 'prepend' && point.ref?.prepend) {
+        point.ref.prepend(badge);
+    }
 }

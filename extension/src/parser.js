@@ -299,6 +299,10 @@ function vacancyListFromState(state) {
     if (Array.isArray(state?.employerChameleonVacancies?.vacancies)) {
         return state.employerChameleonVacancies.vacancies;
     }
+    /** Applicant «Отклики» — блок «Подходящие» внизу страницы. */
+    if (Array.isArray(state?.suitableVacancies?.vacancies)) {
+        return state.suitableVacancies.vacancies;
+    }
     return [];
 }
 
@@ -399,11 +403,14 @@ export function employerIdFromPath(pathname) {
 }
 
 export function detectPage(pathname) {
-    if (/\/search\/vacancy/.test(pathname)) {
+    if (/\/search\/vacancy/.test(pathname) || /\/vacancies\//.test(pathname)) {
         return 'search';
     }
     if (/\/employer\/\d+/.test(pathname)) {
         return 'employer';
+    }
+    if (/\/applicant\/negotiations/.test(pathname)) {
+        return 'negotiations';
     }
     if (vacancyIdFromPath(pathname)) {
         return 'vacancy';

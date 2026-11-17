@@ -7,9 +7,10 @@ HH hides counters in JSON and XHR shards, not in the visible SERP HTML. The exte
 | Page | `detectPage()` | Primary InitialState | Network / fallback |
 |------|----------------|----------------------|--------------------|
 | Home | `home` | `recommendedVacancies.vacancies` | — |
-| Search | `search` | `vacancySearchResult.vacancies` (often stale on SPA) | `/shards/vacancy/search`; hook + `maybeResolveSearchPageData` (HTML `/search/vacancy?page=`) |
+| Search | `search` | `vacancySearchResult.vacancies` (often stale on SPA) | `/shards/vacancy/search`; hook + `maybeResolveSearchPageData` (HTML `/search/vacancy?page=` or `/vacancies/…?page=`) |
 | Vacancy | `vacancy` | `vacancyView.vacancyFull` | `/shards/vacancy/related_vacancies` (+ content-script fetch fallback) |
 | Employer | `employer` | `employerChameleonVacancies.vacancies` («Подходящие» on «О компании») | `/shards/employerview/employer_vacancy_search` (hook, merge cache); `maybeResolveEmployerPageData` if cards stay unbadged |
+| Negotiations | `negotiations` | `suitableVacancies.vacancies` (bottom block) | Negotiation rows: `maybeResolveNegotiationVacancyData` fetches `/vacancy/{id}` and parses `vacancyView` |
 
 Ignored on purpose: `employer_vacancy_search?getVacancyCount=true` (empty `vacancies`).
 

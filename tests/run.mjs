@@ -1,4 +1,18 @@
 import assert from 'node:assert/strict';
+import { parseHTML } from 'linkedom';
+
+function mockVacancyClosest(self) {
+    return (sel) => {
+        const s = String(sel);
+        if (s.includes('data-job-xray')) {
+            return null;
+        }
+        if (s.includes('vacancy-description') || s.includes('vacancy-address-with-map')) {
+            return null;
+        }
+        return self;
+    };
+}
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -24,15 +38,173 @@ import {
 import {
     ingestSearchVacanciesHtml,
     ingestSearchVacanciesShard,
+    ingestVacancyMetrics,
     resetSearchShardCache,
     searchShardCacheSize,
+    searchSignalsById,
 } from '../extension/src/searchShard.js';
 import { computeSignals, formatAge, formatPerDay, toneOf } from '../extension/src/metrics.js';
 import { formatDayMonthRu, formatEveryDaysRu } from '../extension/src/copy.ru.js';
-import { chipsFor } from '../extension/src/ui.js';
+import { applyNegotiationBadges } from '../extension/src/negotiations.js';
+import {
+    cardShowsHhViewers,
+    chipsFor,
+    mountOnSearchCard,
+    mountOnVacancyPage,
+    pickVacancyMountTarget,
+    vacancyIdFromCard,
+    vacancyIdFromNegotiationItem,
+} from '../extension/src/ui.js';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const NOW = new Date('2026-10-18T10:45:00+03:00');
+
+const VACANCY_PAGE_FIXTURES = ['139588338', '139587109', '139549291'];
+
+const APPLICANT_VACANCY_FIXTURES = [
+    { file: 'page1.html', id: '139588338' },
+    { file: 'page2.html', id: '139549291' },
+    { file: 'page3.html', id: '139587109' },
+];
+
+function runApplicantVacancyHtmlFixtures() {
+    for (const { file, id } of APPLICANT_VACANCY_FIXTURES) {
+        const fixturePath = join(root, 'tests/fixtures', file);
+        assert.ok(existsSync(fixturePath), `missing tests/fixtures/${file}`);
+        const html = readFileSync(fixturePath, 'utf8');
+        const state = extractInitialStateFromHtml(html);
+        const item = extractVacancy(state, `/vacancy/${id}`);
+        assert.equal(item?.id, id, `extractVacancy ${file}`);
+
+        const { document, window } = parseHTML(html);
+        globalThis.document = document;
+        globalThis.window = window;
+
+        const point = pickVacancyMountTarget(document);
+        assert.notEqual(point.ref, document.body, `${file}: mount body fallback`);
+        assert.equal(point.mode, 'after', `${file}: expected mount after Условия card`);
+        const refText = normalizeVacancyText(point.ref?.textContent);
+        assert.ok(/^Условия/i.test(refText), `${file}: mount ref should be Условия card, got ${refText.slice(0, 40)}`);
+
+        document.querySelectorAll('[data-job-xray-surface="vacancy"]').forEach((node) => node.remove());
+        mountOnVacancyPage(computeSignals(item), document);
+        const badge = document.querySelector('[data-job-xray-surface="vacancy"]');
+        assert.ok(badge, `${file}: badge missing`);
+        assert.equal(badge.getAttribute('data-job-xray'), id);
+        assert.equal(badge.previousElementSibling, point.ref, `${file}: badge not after Условия card`);
+    }
+}
+
+function normalizeVacancyText(value) {
+    return (value || '').replace(/\s+/g, ' ').trim();
+}
+
+function runParttimeHtmlFixture() {
+    const fixturePath = join(root, 'tests/fixtures', 'parttime.html');
+    assert.ok(existsSync(fixturePath), 'missing tests/fixtures/parttime.html');
+    const html = readFileSync(fixturePath, 'utf8');
+    const state = extractInitialStateFromHtml(html);
+    assert.equal(detectPage('/vacancies/podrabotka'), 'search');
+    const items = extractSearchVacancies(state);
+    assert.equal(items.length, 50);
+
+    const { document, window } = parseHTML(html);
+    globalThis.document = document;
+    globalThis.window = window;
+
+    resetSearchShardCache();
+    const byId = searchSignalsById(state);
+    assert.equal(byId.size, 50);
+
+    document.querySelectorAll('[data-job-xray]').forEach((node) => node.remove());
+    let mounted = 0;
+    for (const article of document.querySelectorAll('[data-qa="vacancy-serp__vacancy"]')) {
+        const id = vacancyIdFromCard(article);
+        const signals = byId.get(id);
+        if (!signals) {
+            continue;
+        }
+        mountOnSearchCard(article, signals);
+        mounted += 1;
+    }
+    assert.equal(mounted, 50);
+}
+
+function runNegotiationsHtmlFixture() {
+    const fixturePath = join(root, 'tests/fixtures', 'reviews.html');
+    assert.ok(existsSync(fixturePath), 'missing tests/fixtures/reviews.html');
+    const html = readFileSync(fixturePath, 'utf8');
+    const state = extractInitialStateFromHtml(html);
+    const suitable = extractSearchVacancies(state);
+    assert.equal(suitable.length, 6, 'suitableVacancies in negotiations InitialState');
+    assert.equal(detectPage('/applicant/negotiations'), 'negotiations');
+
+    const { document, window } = parseHTML(html);
+    globalThis.document = document;
+    globalThis.window = window;
+
+    resetSearchShardCache();
+    const byId = searchSignalsById(state);
+    assert.equal(byId.size, 6);
+
+    document.querySelectorAll('[data-job-xray]').forEach((node) => node.remove());
+    for (const article of document.querySelectorAll('[data-qa="vacancy-serp__vacancy"]')) {
+        const id = vacancyIdFromCard(article);
+        const signals = byId.get(id);
+        assert.ok(signals, `signals for suitable card ${id}`);
+        mountOnSearchCard(article, signals);
+    }
+    assert.equal(document.querySelectorAll('[data-job-xray-surface="search"]').length, 6);
+
+    const negoItem = document.querySelector('[data-qa="negotiations-item"]');
+    const negoId = vacancyIdFromNegotiationItem(negoItem);
+    assert.equal(negoId, '139549291');
+    ingestVacancyMetrics({
+        id: negoId,
+        title: 'Tech Lead',
+        total: 413,
+        totalAlt: 412,
+        unread: 5,
+        publishedAt: NOW,
+        createdAt: NOW,
+        properties: [],
+        source: 'vacancy',
+    });
+    applyNegotiationBadges(state);
+    assert.ok(negoItem.querySelector('[data-job-xray]'), 'negotiation row badge');
+}
+
+function runVacancyPageHtmlFixtures() {
+    for (const id of VACANCY_PAGE_FIXTURES) {
+        const fixturePath = join(root, 'tests/fixtures', `vacancy-${id}.html`);
+        assert.ok(existsSync(fixturePath), `missing tests/fixtures/vacancy-${id}.html`);
+        const html = readFileSync(fixturePath, 'utf8');
+        const state = extractInitialStateFromHtml(html);
+        const item = extractVacancy(state, `/vacancy/${id}`);
+        assert.equal(item?.id, id, `extractVacancy ${id}`);
+        assert.ok(item.total > 0, `counters for ${id}`);
+
+        const { document, window } = parseHTML(html);
+        globalThis.document = document;
+        globalThis.window = window;
+
+        const point = pickVacancyMountTarget(document);
+        assert.notEqual(point.ref, document.body, `${id}: mount fell back to body`);
+        assert.notEqual(point.mode, 'prepend', `${id}: mount mode prepend`);
+
+        document.querySelectorAll('[data-job-xray-surface="vacancy"]').forEach((node) => node.remove());
+        mountOnVacancyPage(computeSignals(item), document);
+        const badge = document.querySelector('[data-job-xray-surface="vacancy"]');
+        assert.ok(badge, `${id}: vacancy badge not mounted`);
+        assert.equal(badge.getAttribute('data-job-xray'), id);
+
+        const topActions = document.querySelector('[class*="vacancy-actions_magritte-vacancy-top"]');
+        assert.ok(topActions, `${id}: expected header apply row in fixture HTML`);
+        if (point.mode === 'before') {
+            assert.equal(point.ref, topActions, `${id}: before non-header actions row`);
+        }
+    }
+}
 
 const INTEGRATION_MARKER = join(root, 'data', 'search_php.html');
 
@@ -183,6 +355,362 @@ function runFixtureTests() {
     assert.ok(fromLiveTemplate);
     assert.equal(extractVacancyPage(fromLiveTemplate)?.total, extractVacancyPage(fromFile)?.total);
 
+    const magritteCard = {
+        name: 'card',
+        querySelector: (sel) => (String(sel) === '.vacancy-title' ? titleBox : null),
+        querySelectorAll: () => [],
+    };
+    const headerColumn = {
+        name: 'header-column',
+        className: 'magritte-v-spacing-container___x',
+        parentElement: magritteCard,
+    };
+    const titleBox = {
+        name: 'vacancy-title-box',
+        parentElement: headerColumn,
+        className: 'vacancy-title',
+        closest: (sel) => (String(sel).includes('vacancy-title') ? titleBox : null),
+    };
+    const metaBlock = {
+        name: 'meta-block',
+        className: 'magritte-v-spacing-container___y',
+        parentElement: headerColumn,
+        querySelector: (sel) => (String(sel).includes('vacancy-experience') ? { name: 'exp' } : null),
+    };
+    metaBlock.closest = mockVacancyClosest(metaBlock);
+    titleBox.nextElementSibling = metaBlock;
+    const titleHeading = {
+        name: 'h1',
+        parentElement: titleBox,
+        getBoundingClientRect: () => ({ width: 400, height: 40, top: 100 }),
+        compareDocumentPosition: () => 4,
+        closest: (sel) => {
+            const s = String(sel);
+            if (s.includes('vacancy-title')) {
+                return titleBox;
+            }
+            if (s.includes('magritte-card')) {
+                return magritteCard;
+            }
+            return null;
+        },
+    };
+    const salaryEl = {
+        name: 'salary',
+        parentElement: titleBox,
+        closest: (sel) => (String(sel).includes('vacancy-title') ? titleBox : null),
+    };
+    const actions = { name: 'actions', parentElement: headerColumn };
+    const applyBtn = {
+        getBoundingClientRect: () => ({ width: 200, height: 40, top: 450 }),
+        compareDocumentPosition: () => 4,
+        closest: (sel) => {
+            const s = String(sel);
+            if (s.includes('action-bar')) {
+                return null;
+            }
+            if (s.includes('vacancy-actions')) {
+                return actions;
+            }
+            if (s.includes('magritte-card')) {
+                return magritteCard;
+            }
+            return null;
+        },
+        parentElement: actions,
+    };
+    titleBox.contains = (node) => node === titleBox || node === titleHeading || node === salaryEl;
+    headerColumn.contains = (node) => titleBox.contains(node)
+        || node === headerColumn
+        || node === actions
+        || node === applyBtn;
+    headerColumn.contains = (node) => titleBox.contains(node)
+        || node === metaBlock
+        || node === headerColumn
+        || node === actions
+        || node === applyBtn;
+    magritteCard.contains = (node) => headerColumn.contains(node) || node === magritteCard;
+    const magritteDoc = {
+        querySelectorAll: (sel) => (String(sel).includes('vacancy-response-link-top') ? [applyBtn] : []),
+        querySelector: (sel) => {
+            const s = String(sel);
+            if (s.includes('vacancy-salary')) {
+                return salaryEl;
+            }
+            if (s.includes('h1') || s.includes('vacancy-title')) {
+                return titleHeading;
+            }
+            return null;
+        },
+        body: { name: 'body' },
+    };
+    const magritteMount = pickVacancyMountTarget(magritteDoc);
+    assert.equal(magritteMount.mode, 'after');
+    assert.equal(magritteMount.ref, metaBlock);
+    assert.notEqual(magritteMount.ref, titleBox);
+
+    const brandedSummary = {
+        name: 'branded-summary',
+        textContent: 'Где работать Волгоград График Полная занятость Условия Удалённо',
+        contains: () => false,
+    };
+    brandedSummary.closest = mockVacancyClosest(brandedSummary);
+    const compactCard = {
+        name: 'compact-card',
+        querySelector: () => null,
+        querySelectorAll: (sel) => (
+            String(sel) === 'div, section, dl' ? [brandedSummary] : []
+        ),
+        contains: (node) => node === brandedSummary || node === compactColumn || node === compactCard,
+    };
+    const compactColumn = { name: 'compact-column', parentElement: compactCard };
+    const compactHeading = {
+        name: 'h1',
+        parentElement: compactColumn,
+        getBoundingClientRect: () => ({ width: 400, height: 40, top: 100 }),
+        compareDocumentPosition: () => 4,
+        closest: (sel) => (String(sel).includes('magritte-card') ? compactCard : null),
+    };
+    const compactSalary = { name: 'salary', parentElement: compactColumn, closest: () => null };
+    const compactApply = {
+        getBoundingClientRect: () => ({ width: 200, height: 40, top: 450 }),
+        compareDocumentPosition: () => 4,
+        contains: (node) => node === compactApply,
+        closest: (sel) => {
+            const s = String(sel);
+            if (s.includes('action-bar')) {
+                return null;
+            }
+            if (s.includes('vacancy-actions')) {
+                return null;
+            }
+            if (s.includes('magritte-card')) {
+                return compactCard;
+            }
+            return null;
+        },
+        parentElement: compactColumn,
+    };
+    compactColumn.contains = (node) => node === compactColumn
+        || node === compactHeading
+        || node === compactSalary
+        || node === compactApply;
+    const compactDoc = {
+        querySelectorAll: (sel) => (String(sel).includes('vacancy-response-link-top') ? [compactApply] : []),
+        querySelector: (sel) => {
+            const s = String(sel);
+            if (s.includes('vacancy-salary')) {
+                return compactSalary;
+            }
+            if (s.includes('h1') || s.includes('vacancy-title')) {
+                return compactHeading;
+            }
+            return null;
+        },
+        body: { name: 'body' },
+    };
+    const compactMount = pickVacancyMountTarget(compactDoc);
+    assert.equal(compactMount.mode, 'after');
+    assert.equal(compactMount.ref, brandedSummary);
+
+    const mapSection = { name: 'map', closest: () => mapSection };
+    const bottomActions = {
+        name: 'bottom-actions',
+        contains: (node) => node === mapApply,
+    };
+    const headerActionsForDual = {
+        name: 'header-actions',
+        parentElement: headerColumn,
+        getBoundingClientRect: () => ({ width: 200, height: 40, top: 450 }),
+        contains: (node) => node === applyBtn,
+    };
+    applyBtn.closest = (sel) => {
+        const s = String(sel);
+        if (s.includes('action-bar')) {
+            return null;
+        }
+        if (s.includes('vacancy-actions')) {
+            return headerActionsForDual;
+        }
+        if (s.includes('magritte-card')) {
+            return magritteCard;
+        }
+        return null;
+    };
+    const mapApply = {
+        getBoundingClientRect: () => ({ width: 200, height: 40, top: 2200 }),
+        compareDocumentPosition: () => 4,
+        closest: (sel) => {
+            const s = String(sel);
+            if (s.includes('vacancy-address-with-map') || s.includes('vacancy-description')) {
+                return mapSection;
+            }
+            if (s.includes('vacancy-actions')) {
+                return bottomActions;
+            }
+            return null;
+        },
+        parentElement: bottomActions,
+    };
+    const dualApplyDoc = {
+        querySelectorAll: (sel) => (
+            String(sel).includes('vacancy-response-link-top') ? [mapApply, applyBtn] : []
+        ),
+        querySelector: (sel) => {
+            const s = String(sel);
+            if (s.includes('vacancy-salary')) {
+                return salaryEl;
+            }
+            if (s.includes('h1') || s.includes('vacancy-title')) {
+                return titleHeading;
+            }
+            return null;
+        },
+        body: { name: 'body' },
+    };
+    const dualApplyMount = pickVacancyMountTarget(dualApplyDoc);
+    assert.equal(dualApplyMount.mode, 'after');
+    assert.equal(dualApplyMount.ref, metaBlock);
+
+    const actionsOnlyCard = {
+        name: 'actions-only-card',
+        querySelector: () => null,
+        querySelectorAll: () => [],
+        contains: (node) => node === actionsOnlyColumn
+            || node === actionsOnlyCard
+            || node === headerActionsForDual
+            || node === applyBtn,
+    };
+    const actionsOnlyColumn = {
+        name: 'actions-only-column',
+        parentElement: actionsOnlyCard,
+        contains: (node) => node === actionsOnlyColumn
+            || node === actionsOnlyHeading
+            || node === dualHeaderActions
+            || node === applyBtn,
+    };
+    const actionsOnlyHeading = {
+        name: 'h1',
+        parentElement: actionsOnlyColumn,
+        getBoundingClientRect: () => ({ width: 400, height: 40, top: 100 }),
+        compareDocumentPosition: () => 4,
+        closest: (sel) => (String(sel).includes('magritte-card') ? actionsOnlyCard : null),
+    };
+    const dualHeaderActions = {
+        name: 'header-actions',
+        parentElement: null,
+        getBoundingClientRect: () => ({ width: 200, height: 40, top: 450 }),
+        contains: (node) => node === applyBtn,
+    };
+    applyBtn.closest = (sel) => {
+        const s = String(sel);
+        if (s.includes('action-bar')) {
+            return null;
+        }
+        if (s.includes('vacancy-actions')) {
+            return dualHeaderActions;
+        }
+        if (s.includes('magritte-card')) {
+            return actionsOnlyCard;
+        }
+        return null;
+    };
+    dualHeaderActions.parentElement = actionsOnlyColumn;
+    applyBtn.parentElement = dualHeaderActions;
+    const actionsOnlyDoc = {
+        querySelectorAll: (sel) => (
+            String(sel).includes('vacancy-response-link-top') ? [mapApply, applyBtn] : []
+        ),
+        querySelector: (sel) => {
+            const s = String(sel);
+            if (s.includes('h1') || s.includes('vacancy-title')) {
+                return actionsOnlyHeading;
+            }
+            return null;
+        },
+        body: { name: 'body' },
+    };
+    const actionsOnlyMount = pickVacancyMountTarget(actionsOnlyDoc);
+    assert.equal(actionsOnlyMount.mode, 'before');
+    assert.equal(actionsOnlyMount.ref, dualHeaderActions);
+    assert.notEqual(actionsOnlyMount.ref, bottomActions);
+
+    const headingOnlyDoc = {
+        querySelectorAll: () => [],
+        querySelector: (sel) => {
+            const s = String(sel);
+            if (s === '.vacancy-title') {
+                return null;
+            }
+            if (s.includes('h1') || s.includes('vacancy-title')) {
+                return { name: 'h1' };
+            }
+            return null;
+        },
+        body: { name: 'body' },
+    };
+    const headingMount = pickVacancyMountTarget(headingOnlyDoc);
+    assert.equal(headingMount.mode, 'prepend');
+    assert.equal(headingMount.ref.name, 'body');
+
+    const orphanCard = {
+        name: 'orphan-card',
+        querySelector: () => null,
+        querySelectorAll: () => [],
+        contains: () => false,
+    };
+    const cardOnlyDoc = {
+        querySelectorAll: () => [],
+        querySelector: () => null,
+        body: { name: 'body' },
+    };
+    const cardOnlyApply = {
+        getBoundingClientRect: () => ({ width: 200, height: 40 }),
+        closest: (sel) => (String(sel).includes('magritte-card') ? orphanCard : null),
+        parentElement: { name: 'card-parent' },
+    };
+    cardOnlyDoc.querySelectorAll = (sel) => (String(sel).includes('vacancy-response-link-top')
+        ? [cardOnlyApply]
+        : []);
+    const cardOnlyMount = pickVacancyMountTarget(cardOnlyDoc);
+    assert.equal(cardOnlyMount.mode, 'prepend');
+    assert.equal(cardOnlyMount.ref.name, 'body');
+
+    let staleRemoved = false;
+    const staleBadge = {
+        getAttribute: () => '139587109',
+        remove: () => { staleRemoved = true; },
+        parentElement: { name: 'body' },
+    };
+    mountOnVacancyPage({ id: '139587109', tone: 'good', ai: {} }, {
+        body: { name: 'body' },
+        contains: () => true,
+        querySelector: (sel) => (String(sel).includes('job-xray-surface') ? staleBadge : null),
+        querySelectorAll: () => [],
+    });
+    assert.equal(staleRemoved, true);
+
+    const viewersRoot = {
+        querySelectorAll: () => [
+            { children: [], textContent: 'Опубликована 17.11.2026 · Сейчас смотрят 101 человек', closest: () => null },
+        ],
+    };
+    runVacancyPageHtmlFixtures();
+    runApplicantVacancyHtmlFixtures();
+    runNegotiationsHtmlFixture();
+    runParttimeHtmlFixture();
+
+    assert.equal(cardShowsHhViewers(viewersRoot), true);
+    const vacancyChips = chipsFor({
+        id: '1',
+        total: 10,
+        onlineViewers: 9,
+        ageDays: 1,
+        tone: 'good',
+        ai: {},
+    }, 'vacancy', { hideOnlineViewers: true });
+    assert.equal(vacancyChips.some((chip) => /смотрят|👁|глаз/i.test(chip.text) || chip.icon === 'eye'), false);
+
     const relatedShard = JSON.parse(
         readFileSync(join(root, 'tests/fixtures/related-vacancies.json'), 'utf8'),
     );
@@ -226,11 +754,12 @@ function runFixtureTests() {
 
     assert.equal(detectPage('/'), 'home');
     assert.equal(detectPage('/search/vacancy'), 'search');
+    assert.equal(detectPage('/vacancies/podrabotka'), 'search');
     assert.equal(detectPage('/employer/4335309'), 'employer');
     assert.equal(employerIdFromPath('/employer/4335309'), '4335309');
     assert.equal(employerIdFromPath('/search/vacancy'), null);
     assert.equal(detectPage('/vacancy/137961989'), 'vacancy');
-    assert.equal(detectPage('/applicant/negotiations'), null);
+    assert.equal(detectPage('/applicant/negotiations'), 'negotiations');
 
     const employerShard = JSON.parse(
         readFileSync(join(root, 'tests/fixtures/employer-vacancy-search.json'), 'utf8'),
