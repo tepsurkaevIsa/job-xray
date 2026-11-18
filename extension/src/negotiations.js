@@ -20,7 +20,7 @@ const inFlight = new Set();
 const failedIds = new Set();
 let resolvePass = 0;
 
-function debug(...args) {
+function negotiationsDebug(...args) {
     try {
         if (globalThis.localStorage?.getItem('job-xray-debug') === '1') {
             console.log('[job-xray]', ...args);
@@ -59,10 +59,10 @@ export function applyNegotiationBadges(state) {
 
 async function fetchVacancyMetrics(vacancyId) {
     const url = new URL(`/vacancy/${vacancyId}`, location.origin);
-    debug('negotiations fetch', url.toString());
+    negotiationsDebug('negotiations fetch', url.toString());
     const response = await fetch(url.toString(), { credentials: 'include' });
     if (!response.ok) {
-        debug('negotiations fetch failed', vacancyId, response.status);
+        negotiationsDebug('negotiations fetch failed', vacancyId, response.status);
         return null;
     }
     const html = await response.text();
@@ -118,7 +118,7 @@ export function maybeResolveNegotiationVacancyData(state, onResolved) {
                 }
             } catch (error) {
                 failedIds.add(id);
-                debug('negotiations resolve error', id, error);
+                negotiationsDebug('negotiations resolve error', id, error);
             } finally {
                 inFlight.delete(id);
             }

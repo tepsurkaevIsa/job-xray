@@ -6,6 +6,17 @@ Version numbers match `package.json`, extension manifests, and Git tags (`v*`). 
 
 ## [Unreleased]
 
+## [0.1.9] - 2026-11-18
+
+### Fixed
+
+- Release Chrome/Firefox zip: `negotiations.js` was missing from concatenated `content.js` (v0.1.8 zips failed everywhere; unpacked `extension/` worked).
+
+### Changed
+
+- Bundle order is derived from the `content.js` import graph (no manual file list).
+- `npm run check` smoke-tests release bundle startup before `dist/` is written.
+
 ## [0.1.8] - 2026-11-17
 
 ### Added

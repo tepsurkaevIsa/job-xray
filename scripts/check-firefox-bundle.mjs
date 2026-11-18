@@ -3,10 +3,11 @@ import { readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
-    BUNDLE_ORDER,
+    getBundleOrder,
     readFirefoxContentBundle,
     stripModuleSyntax,
 } from './lib/firefox-bundle.mjs';
+import { smokeContentBundle } from './smoke-content-bundle.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -26,7 +27,8 @@ async function findDuplicateBindingsAcrossSources() {
     const seen = new Map();
     const duplicates = [];
 
-    for (const rel of BUNDLE_ORDER) {
+    const bundleOrder = await getBundleOrder();
+    for (const rel of bundleOrder) {
         const source = stripModuleSyntax(await readFile(join(root, rel), 'utf8'));
         for (const line of source.split('\n')) {
             if (/^\s/.test(line)) {
@@ -81,6 +83,8 @@ export async function validateFirefoxBundle() {
 
     parseAsFirefoxScript(bundle, 'content.js (Firefox bundle)');
 
+    await smokeContentBundle();
+
     const htmlWrite = bundle.match(/\.(innerHTML|outerHTML)\s*=|insertAdjacentHTML\s*\(|document\.write\s*\(/);
     if (htmlWrite) {
         throw new Error(
@@ -100,4 +104,5 @@ const isMain =
 if (isMain) {
     await validateFirefoxBundle();
     console.log('ok: Firefox bundle and hook scripts parse as classic scripts (AMO-safe)');
+    console.log('ok: content bundle smoke (release content.js startup)');
 }
